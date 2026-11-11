@@ -1,0 +1,193 @@
+diff --git a/libsrc/saturate.cc b/libsrc/saturate.cc
+index 7cd113b..6d3bb4c 100644
+--- a/libsrc/saturate.cc
++++ b/libsrc/saturate.cc
+@@ -31,6 +31,11 @@
+ // message and reduce to this value:
+ const int max_search_bound = 18;
+ 
++// Minimum number of auxiliary primes without a rank increase before trying
++// enlargement (the pre-2022 value); larger maxntries still widens the window.
++// Useful primes can be rare when there is a rational isogeny (issue #104).
++const int n_aux_stuck = 20;
++
+ void saturator::reset_points(const vector<Point>& PP)
+ {
+   Plist=PP;
+@@ -317,7 +322,7 @@ int saturator::do_saturation(int pp, int maxntries)
+     cout<<"Testing "<<p<<"-saturation..."<<endl;
+   if (trivially_saturated(p))
+     return 0;  // index=1, log=0
+-  if(test_saturation(p, maxntries))
++  if(test_saturation(p, std::max(n_aux_stuck, maxntries)))
+     return 0;
+   if(verbose>1)
+     cout<<"Points not (yet) proved to be "<<p
+@@ -337,7 +342,7 @@ int saturator::do_saturation(int pp, int maxntries)
+ 	      return -1;
+ 	    }
+ 	}
+-      if(test_saturation_extra(p, maxntries)) return log_index;
++      if(test_saturation_extra(p, std::max(n_aux_stuck, maxntries))) return log_index;
+       if(verbose>1) cout<<"Points not (yet) proved to be "<<p
+ 	  <<"-saturated, attempting enlargement..."<<endl;
+     }
+diff --git a/tests/Makefile.am b/tests/Makefile.am
+index e691d89..28e1657 100644
+--- a/tests/Makefile.am
++++ b/tests/Makefile.am
+@@ -93,7 +93,7 @@ check_procs: procs_tests
+ 
+ ################ QCURVES #############################################
+ 
+-QCURVES_TESTS = tcurve tpoints theight thtconst tlatconst tegr telog tdivpol tperiods tsatbnd tsat tsat2 tsat3 conductor tate torsion twist allisog checkgens tegros
++QCURVES_TESTS = tcurve tpoints theight thtconst tlatconst tegr telog tdivpol tperiods tsatbnd tsat tsat2 tsat3 tsat104 conductor tate torsion twist allisog checkgens tegros
+ QCURVES_TESTS_SUFFIXED = $(QCURVES_TESTS:=$(EXEEXT))
+ qcurves_tests: $(QCURVES_TESTS_SUFFIXED)
+ 
+@@ -110,6 +110,7 @@ tsatbnd_SOURCES=tsatbnd.cc
+ tsat_SOURCES=tsat.cc
+ tsat2_SOURCES=tsat2.cc
+ tsat3_SOURCES=tsat3.cc
++tsat104_SOURCES=tsat104.cc
+ conductor_SOURCES=conductor.cc
+ tate_SOURCES=tate.cc
+ torsion_SOURCES=torsion.cc
+diff --git a/tests/in_no_ntl/tsat104.in b/tests/in_no_ntl/tsat104.in
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/in_ntl/tsat104.in b/tests/in_ntl/tsat104.in
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/out_no_ntl/tsat104.out b/tests/out_no_ntl/tsat104.out
+new file mode 100644
+index 0000000..942b8df
+--- /dev/null
++++ b/tests/out_no_ntl/tsat104.out
+@@ -0,0 +1,4 @@
++Checking deliberately insufficient enlargement budget
++After 1 attempts at enlargement, giving up!
++--points not proved 5-saturated,
++5-saturation isogeny regression and controls passed
+diff --git a/tests/out_ntl/tsat104.out b/tests/out_ntl/tsat104.out
+new file mode 100644
+index 0000000..942b8df
+--- /dev/null
++++ b/tests/out_ntl/tsat104.out
+@@ -0,0 +1,4 @@
++Checking deliberately insufficient enlargement budget
++After 1 attempts at enlargement, giving up!
++--points not proved 5-saturated,
++5-saturation isogeny regression and controls passed
+diff --git a/tests/tsat.cc b/tests/tsat.cc
+index 3c22dc1..e8e1e17 100644
+--- a/tests/tsat.cc
++++ b/tests/tsat.cc
+@@ -104,7 +104,7 @@ int main()
+   int ok = sieve.saturate(unsat, index, pmax, pmin, 10);
+ 
+   cout<<"Finished saturation" << endl;
+-  if (ok || pmax>0)
++  if (ok)
+     {
+       cout << "Saturation was successful: ";
+         if(index>1)
+diff --git a/tests/tsat104.cc b/tests/tsat104.cc
+new file mode 100644
+index 0000000..d3d8a50
+--- /dev/null
++++ b/tests/tsat104.cc
+@@ -0,0 +1,93 @@
++// Regression for issue #104: scarce useful primes in a 5-isogeny class.
++// Certificate: at q=601, E2(F_q) = Z/125 x Z/5 and P2 has order 125, so P2 is
++// not a 5-multiple; the 5-isogeny E1->E2 maps P1 to P2 and kills T, so P1+kT too.
++#include <eclib/interface.h>
++#include <eclib/curve.h>
++#include <eclib/points.h>
++#include <eclib/saturate.h>
++#include <iostream>
++#include <vector>
++
++namespace {
++bool check(Curvedata& C, const Point& P, int expected, const char* label)
++{
++    if (!P.isvalid()) {
++        std::cerr << label << ": invalid input point\n";
++        return false;
++    }
++    saturator sieve(&C);
++    sieve.set_points(std::vector<Point>{P});
++    // Direct do_saturation() expects the bound to have been computed.
++    sieve.get_index_bound();
++    int result = sieve.do_saturation(5);
++    if (result != expected) {
++        std::cerr << label << ": expected log_5(index)=" << expected
++                  << ", got " << result << '\n';
++        return false;
++    }
++    const auto& gens = sieve.getgens();
++    if (gens.size()!=1 || !gens[0].isvalid()) return false;
++    int index=1;
++    for (int k=0; k<expected; ++k) index*=5;
++    // A basis may change sign or differ by rational torsion.
++    if (!(5*(index*gens[0]-P)).is_zero() &&
++        !(5*(index*gens[0]+P)).is_zero()) {
++        std::cerr << label << ": incorrect enlarged generator\n";
++        return false;
++    }
++    return true;
++}
++}
++
++int main()
++{
++    set_precision(100);
++    initprimes("PRIMES", 0);
++    Curvedata E2(NTL::ZZ(1), NTL::ZZ(0), NTL::ZZ(0),
++                 NTL::ZZ(71050), NTL::ZZ(-11173128), 0);
++    Point P2(E2, NTL::ZZ(132), NTL::ZZ(648), NTL::ZZ(1));
++    bool ok=check(E2, P2, 0, "31530h2 P");
++    ok=check(E2, 5*P2, 1, "31530h2 5P") && ok;
++    ok=check(E2, 25*P2, 2, "31530h2 25P") && ok;
++
++    // The rational 5-torsion on the isogenous curve must remain part
++    // of the saturation calculation. Test every torsion translate.
++    Curvedata E1(NTL::ZZ(1), NTL::ZZ(0), NTL::ZZ(0),
++                 NTL::ZZ(-10250), NTL::ZZ(400932), 0);
++    Point P1(E1, NTL::ZZ(54), NTL::ZZ(48), NTL::ZZ(1));
++    Point T(E1, NTL::ZZ(4), NTL::ZZ(598), NTL::ZZ(1));
++    if (!T.isvalid() || T.is_zero() || !(5*T).is_zero()) return 1;
++    for (int k=0; k<5; ++k)
++        ok=check(E1, P1+k*T, 0, "31530h1 P+kT") && ok;
++    ok=check(E1, 5*P1, 1, "31530h1 5P") && ok;
++    ok=check(E1, 25*P1, 2, "31530h1 25P") && ok;
++
++    // The adjacent isogeny class at the same conductor is unaffected.
++    Curvedata Ei(NTL::ZZ(1), NTL::ZZ(0), NTL::ZZ(0),
++                 NTL::ZZ(75), NTL::ZZ(-1935), 0);
++    Point Pnext(Ei, NTL::ZZ(12), NTL::ZZ(21), NTL::ZZ(1));
++    ok=check(Ei, Pnext, 0, "31530i1 P") && ok;
++    ok=check(Ei, 5*Pnext, 1, "31530i1 5P") && ok;
++    ok=check(Ei, 25*Pnext, 2, "31530i1 25P") && ok;
++
++    // An ordinary rank-one curve provides a saturation control.
++    Curvedata E0(NTL::ZZ(0), NTL::ZZ(0), NTL::ZZ(1),
++                 NTL::ZZ(-1), NTL::ZZ(0), 0);
++    Point P0(E0, NTL::ZZ(0), NTL::ZZ(0), NTL::ZZ(1));
++    ok=check(E0, P0, 0, "37a1 P") && ok;
++    ok=check(E0, 5*P0, 1, "37a1 5P") && ok;
++    ok=check(E0, 25*P0, 2, "37a1 25P") && ok;
++
++    // A deliberately insufficient sieve budget must return unknown.
++    saturator limited(&E2);
++    limited.set_points(std::vector<Point>{P2});
++    limited.get_index_bound();
++    std::cout << "Checking deliberately insufficient enlargement budget\n";
++    if (limited.do_saturation(5, 1)!=-1 || limited.is_saturated()) {
++        std::cerr << "insufficient sieve incorrectly certified saturation\n";
++        ok=false;
++    }
++    if (!ok) return 1;
++    std::cout << "5-saturation isogeny regression and controls passed\n";
++    return 0;
++}
